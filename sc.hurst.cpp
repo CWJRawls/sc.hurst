@@ -283,11 +283,23 @@ void sc_hurst_float(t_sc_hurst *x, double f) {
 
 void sc_hurst_list(t_sc_hurst *x, t_symbol* a, long argc, t_atom *argv) {
     t_atom* arg_temp = argv;
-    for(int i = 0; i < argc; i++, arg_temp++) {
+    
+    long offset = 0;
+    long data_list_size = argc;
+    if(argc > x->series_max_length) {
+        offset = argc - x->series_max_length;
+        data_list_size = x->series_max_length;
+    }
+    
+    double data_in[data_list_size];
+    
+    for(int i = 0; (i + offset) < argc; i++, arg_temp++) {
         switch(atom_gettype(arg_temp)) {
             case A_LONG:
+                data_in[i] = (double)atom_getlong(arg_temp);
                 break;
             case A_FLOAT:
+                data_in[i] = atom_getfloat(arg_temp);
                 break;
             default:
                 object_warn((t_object*)x, "Received non-numeric input");
@@ -295,32 +307,16 @@ void sc_hurst_list(t_sc_hurst *x, t_symbol* a, long argc, t_atom *argv) {
         }
     }
     
+    critical_tryenter(0);
+    
     arg_temp = argv;
     int idx = 0;
-    double* data_list;
-    long data_size = argc;
     if(argc > x->series_max_length) {
         arg_temp += argc - x->series_max_length;
         idx = argc - x->series_max_length;
-        data_size = x->series_max_length;
     }
     
-    data_list = (double*)sysmem_newptr(sizeof(double) * data_size);
-    
-    double* data_temp = data_list;
-    
-    for(; idx < argc; idx++, arg_temp++, data_temp++) {
-        switch(atom_gettype(arg_temp)) {
-            case A_LONG:
-                *data_temp = (double)atom_getlong(arg_temp);
-                break;
-            case A_FLOAT:
-                *data_temp = atom_getfloat(arg_temp);
-                break;
-        }
-    }
-    
-    long tot_size = x->series_length + data_size;
+    long tot_size = x->series_length + data_list_size;
     
     long del_idx = 0;
     
@@ -334,17 +330,15 @@ void sc_hurst_list(t_sc_hurst *x, t_symbol* a, long argc, t_atom *argv) {
     
     double* temp = x->data_set + x->series_length;
     
-    sysmem_copyptr(data_list, temp, sizeof(double) * data_size);
+    sysmem_copyptr(&data_in, temp, sizeof(double) * data_list_size);
     
-    //free data
-    data_temp = data_list;
-    for(int i = 0; i < data_size; i++) {
-        double* d2 = data_temp;
-        data_temp++;
-        sysmem_freeptr(d2);
+    x->series_length = (x->series_length + data_list_size) <= x->series_max_length ? x->series_length + data_list_size : x->series_max_length;
+    
+    critical_exit(0);
+    
+    if(x->calc_on_input == 1) {
+        sc_hurst_calculate(x);
     }
-    
-    x->series_length += data_size;
 }
 
 /*==================================================================================
@@ -627,7 +621,9 @@ void sc_hurst_calculate(t_sc_hurst *x) {
         if(x->show_size_warning == 1) {
             object_warn((t_object*)x, "Too few values to calculate Hurst Exponent.");
             object_warn((t_object*)x, "Requires 16 values, currently have %ld.", x->series_length);
+            object_warn((t_object*)x, "Outputting default value.");
         }
+        outlet_float(x->out2, 0.5);
         return;
     }
     
@@ -718,7 +714,7 @@ void sc_hurst_calculate(t_sc_hurst *x) {
             sysmem_freeptr(rsa_temp);
         }
         
-        *rs_temp = log2(rs_sum / ((layer_size > 0) ? layer_size : 1));
+        *rs_temp = log2((rs_sum != 0.0 ? rs_sum : 0.00001) / ((layer_size > 0) ? layer_size : 1));
 
         *size_temp = log2((pow(2, i) * div_size));
 
@@ -757,6 +753,9 @@ void sc_hurst_calculate(t_sc_hurst *x) {
         sysmem_freeptr(r2);
         sysmem_freeptr(s2);
     }
+    
+    //clip values into range
+    hurst_exp = (hurst_exp > 1.0) ? 1.0 : ((hurst_exp < 0.0) ? 0.0 : hurst_exp);
     
     //output the computed data
     outlet_float(x->out2, hurst_exp);
@@ -839,7 +838,7 @@ void sc_hurst_helper_linear_regression(t_hurst_helper_lin_reg** x){
     }
     
     double denom = (length * sumxsq) - pow(sumx, 2);
-    double slope = ((length * sumxy) - (sumx * sumy)) / denom;
+    double slope =  (denom != 0.0 ? (((length * sumxy) - (sumx * sumy)) / denom) : 1.0);
     
     (*x)->slope = slope;
 }
